@@ -19,7 +19,7 @@ func (item Item) Expired() bool {
 	return time.Now().UnixNano() > item.Expiration
 }
 
-//Storage mecanism for caching strings in memory
+//Storage mechanism for caching strings in memory
 type Storage struct {
 	items map[string]Item
 	mu    *sync.RWMutex

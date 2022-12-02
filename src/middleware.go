@@ -2,14 +2,18 @@ package main
 
 import (
 	"fmt"
+	"github.com/jiaming2012/http-cache/src/cache"
 	"github.com/jiaming2012/http-cache/src/cache/memory"
+	"github.com/jiaming2012/http-cache/src/constants"
+	log "github.com/jiaming2012/http-cache/src/logger"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 )
+
+var storage cache.Storage
 
 // refactor this
 func init() {
@@ -53,17 +57,29 @@ func appendHostToXForwardHeader(header http.Header, host string) {
 	header.Set("X-Forwarded-For", host)
 }
 
+func cacheResponse(cacheKey string, body []byte) error {
+	duration, err := time.ParseDuration(constants.CacheDuration)
+	if err != nil {
+		return err
+	}
+
+	log.Logger.Infof("New page cached: %s for %s\n", cacheKey, constants.CacheDuration)
+	storage.Set(cacheKey, body, duration)
+	return nil
+}
+
 type proxy struct {
 }
 
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	hashKey := r.Host + r.URL.String()
-	content := storage.Get(hashKey)
+	cacheKey := r.Host + r.URL.String()
+	content := storage.Get(cacheKey)
 	if content != nil {
-		fmt.Print("Cache Hit!\n")
+		log.Logger.Debug("Cache Hit!")
 		w.Write(content)
 	} else {
-		log.Println(r.RemoteAddr, " ", r.Method, " ", r.URL)
+		log.Logger.Debug("Cache Miss!")
+		log.Logger.Infof("Log Request: %s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 
 		client := &http.Client{}
 
@@ -82,30 +98,25 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp, err := client.Do(r)
 		if err != nil {
 			http.Error(w, "Server Error", http.StatusInternalServerError)
-			log.Fatal("ServeHTTP:", err)
+			log.Logger.Fatalf("ServeHTTP: %v", err)
 		}
 		defer resp.Body.Close()
 
-		log.Println(r.RemoteAddr, " ", resp.Status)
+		// todo: read in chunks as opposed to whole body
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			log.Logger.Errorf("Error reading body: %v", err)
+			http.Error(w, "can't read body", http.StatusBadRequest)
+			return
+		}
+
+		log.Logger.Infof("Log Response: %s %s", r.RemoteAddr, resp.Status)
 
 		delHopHeaders(resp.Header)
 
-		// cache
-		// todo: make dynamic
-		duration := "20s"
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			// todo: propagate
-			//log.Printf("Error reading body: %v", err)
-			//http.Error(w, "can't read body", http.StatusBadRequest)
-			//return
-			panic(err)
-		}
-
-		if d, err := time.ParseDuration(duration); err == nil {
-			fmt.Printf("New page cached: %s for %s\n", r.RequestURI, duration)
-			storage.Set(hashKey, body, d)
-		}
+		// cache our response before sending back to user
+		// todo: make this an event
+		cacheResponse(cacheKey, body)
 
 		copyHeader(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
