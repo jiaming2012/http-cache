@@ -16,6 +16,8 @@ func main() {
 
 	handler := &proxy{}
 
+	log.Logger.Infof("Operating in mode %s", constants.AppMode)
 	log.Logger.Infof("Proxy listening on :%s\n", port)
+
 	http.ListenAndServe(fmt.Sprintf(":%s", port), handler)
 }

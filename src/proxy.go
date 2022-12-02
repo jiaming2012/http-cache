@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/jiaming2012/http-cache/src/cache"
+	"github.com/jiaming2012/http-cache/src/cache/eventstore"
 	"github.com/jiaming2012/http-cache/src/cache/memory"
 	"github.com/jiaming2012/http-cache/src/constants"
 	log "github.com/jiaming2012/http-cache/src/logger"
@@ -17,7 +18,17 @@ var storage cache.Storage
 
 // refactor this
 func init() {
-	storage = memory.NewStorage()
+	if constants.AppMode == "memory" {
+		storage = memory.NewStorage()
+	} else if constants.AppMode == "eventstoredb" {
+		var err error
+		storage, err = eventstore.NewStorage()
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		panic(fmt.Errorf("unknown value for env APP_MODE=%v. Expected memory or eventstoredb", constants.AppMode))
+	}
 }
 
 // Hop-by-hop headers. These are removed when sent to the backend.
@@ -41,7 +52,7 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-func delHopHeaders(header http.Header) {
+func deleteHopHeaders(header http.Header) {
 	for _, h := range hopHeaders {
 		header.Del(h)
 	}
@@ -57,14 +68,19 @@ func appendHostToXForwardHeader(header http.Header, host string) {
 	header.Set("X-Forwarded-For", host)
 }
 
+func buildCacheKey(r *http.Request) string {
+	return r.Host + r.URL.String()
+}
+
 func cacheResponse(cacheKey string, body []byte) error {
+	// todo: handle in viper
 	duration, err := time.ParseDuration(constants.CacheDuration)
 	if err != nil {
 		return err
 	}
 
-	log.Logger.Infof("New page cached: %s for %s\n", cacheKey, constants.CacheDuration)
 	storage.Set(cacheKey, body, duration)
+	log.Logger.Infof("Successfully cached: %s for %s\n", cacheKey, constants.CacheDuration)
 	return nil
 }
 
@@ -72,14 +88,14 @@ type proxy struct {
 }
 
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	cacheKey := r.Host + r.URL.String()
+	cacheKey := buildCacheKey(r)
 	content := storage.Get(cacheKey)
 	if content != nil {
 		log.Logger.Debug("Cache Hit!")
 		w.Write(content)
 	} else {
 		log.Logger.Debug("Cache Miss!")
-		log.Logger.Infof("Log Request: %s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+		log.Logger.Infof("Log Request: %s %s %s", r.RemoteAddr, r.Method, r.URL)
 
 		client := &http.Client{}
 
@@ -89,7 +105,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.URL.Scheme = "http"
 		r.URL.Host = r.Host
 
-		delHopHeaders(r.Header)
+		deleteHopHeaders(r.Header)
 
 		if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			appendHostToXForwardHeader(r.Header, clientIP)
@@ -112,7 +128,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		log.Logger.Infof("Log Response: %s %s", r.RemoteAddr, resp.Status)
 
-		delHopHeaders(resp.Header)
+		deleteHopHeaders(resp.Header)
 
 		// cache our response before sending back to user
 		// todo: make this an event
